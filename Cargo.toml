@@ -1,0 +1,16 @@
+[package]
+name = "l3io_age_passphrase"
+version = "0.1.0"
+edition = "2021"
+description = "Streaming age passphrase encrypt/decrypt for Python"
+license = "MIT"
+publish = false
+
+[lib]
+name = "l3io_age_passphrase"
+crate-type = ["cdylib"]
+
+[dependencies]
+age = { version = "0.12.1", features = ["armor"] }
+pyo3 = { version = "0.29.2", features = ["abi3", "abi3-py311", "extension-module"] }
+pyo3-file = "0.17.0"

@@ -1,0 +1,198 @@
+# Build multi-platform wheels and attach them to a GitHub Release.
+# PyPI is intentionally not configured yet — GitHub Releases only.
+
+name: Publish
+
+on:
+  push:
+    tags: ["v*.*.*", "!v0.0.0"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build wheels without creating a GitHub Release
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  version-gate:
+    name: version gate
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cargo.toml and pyproject.toml versions must match
+        id: ver
+        run: |
+          set -euo pipefail
+          cargo_ver=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          py_ver=$(sed -n 's/^version = "\([^"]*\)"/\1/p' pyproject.toml | head -1)
+          if [ "$cargo_ver" != "$py_ver" ]; then
+            echo "::error::Cargo.toml ($cargo_ver) != pyproject.toml ($py_ver)"
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$cargo_ver" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match package version $cargo_ver"
+              exit 1
+            fi
+          fi
+          echo "version=${cargo_ver}" >> "$GITHUB_OUTPUT"
+          echo "package version ${cargo_ver}"
+
+  linux:
+    name: wheel · linux-${{ matrix.target }}
+    needs: [version-gate]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: build manylinux wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: "2_17"
+      - name: build musllinux wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: musllinux_1_2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist/*
+
+  macos:
+    name: wheel · macos-${{ matrix.target }}
+    needs: [version-gate]
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist/*
+
+  windows:
+    name: wheel · windows-x64
+    needs: [version-gate]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: x64
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x64
+          path: dist/*
+
+  sdist:
+    name: sdist
+    needs: [version-gate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: dist/*
+
+  smoke:
+    name: smoke install
+    needs: [linux, sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-linux-x86_64
+          merge-multiple: true
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: "0.11.6"
+          python-version: "3.11"
+      - name: install manylinux wheel and round-trip
+        run: |
+          set -euo pipefail
+          wheel=$(ls dist/l3io_age_passphrase-*-manylinux*.whl | head -1)
+          uv pip install --system "$wheel"
+          python - <<'PY'
+          import io
+          from l3io_age_passphrase import encrypt_io, decrypt_io
+          plain = b"smoke\n" * 100
+          out = io.BytesIO()
+          encrypt_io(io.BytesIO(plain), out, "smoke-secret")
+          back = io.BytesIO()
+          decrypt_io(io.BytesIO(out.getvalue()), back, "smoke-secret")
+          assert back.getvalue() == plain
+          print("smoke ok")
+          PY
+
+  github-release:
+    name: GitHub Release
+    needs: [linux, macos, windows, sdist, smoke, version-gate]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+      - name: list artifacts
+        run: ls -la dist/
+      - name: create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version-gate.outputs.version }}
+          name: v${{ needs.version-gate.outputs.version }}
+          generate_release_notes: true
+          files: dist/*
+          fail_on_unmatched_files: true
+          body: |
+            Streaming age passphrase encrypt/decrypt for Python.
+
+            Install a wheel that matches your platform from the assets below, for example:
+
+            ```shell
+            uv pip install https://github.com/${{ github.repository }}/releases/download/v${{ needs.version-gate.outputs.version }}/<wheel-filename>.whl
+            ```
+
+            See the [README](https://github.com/${{ github.repository }}#readme) for API docs.
+            PyPI publish is not enabled yet.

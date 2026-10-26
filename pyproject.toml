@@ -1,0 +1,59 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "l3io-age-passphrase"
+version = "0.1.0"
+description = "Streaming age passphrase encrypt/decrypt (sole scrypt, stock age -d)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Shawn Anderson" }]
+keywords = ["age", "encryption", "passphrase", "streaming"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Rust",
+  "Topic :: Security :: Cryptography",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/ravensorb/l3io-age-passphrase"
+Documentation = "https://github.com/ravensorb/l3io-age-passphrase#readme"
+Source = "https://github.com/ravensorb/l3io-age-passphrase"
+Issues = "https://github.com/ravensorb/l3io-age-passphrase/issues"
+Changelog = "https://github.com/ravensorb/l3io-age-passphrase/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<10",
+  "ruff==0.16.7",
+  "maturin>=1.7,<2",
+]
+
+[tool.uv]
+required-version = "==0.11.6"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "l3io_age_passphrase"
+include = ["l3io_age_passphrase.pyi", "py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
