@@ -146,9 +146,11 @@ jobs:
       - name: install manylinux wheel and round-trip
         run: |
           set -euo pipefail
-          wheel=$(ls dist/l3io_age_passphrase-*-manylinux*.whl | head -1)
-          uv pip install --system "$wheel"
-          python - <<'PY'
+          wheel=$(ls dist/l3io_age_passphrase-*-manylinux*.whl | grep -v musllinux | head -1)
+          echo "using $wheel"
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke/bin/python "$wheel"
+          /tmp/smoke/bin/python - <<'PY'
           import io
           from l3io_age_passphrase import encrypt_io, decrypt_io
           plain = b"smoke\n" * 100
