@@ -1,5 +1,9 @@
-# Build multi-platform wheels and attach them to a GitHub Release.
-# PyPI is intentionally not configured yet — GitHub Releases only.
+# Build multi-platform wheels, attach them to a GitHub Release, and mirror
+# them to the family Gitea PyPI index when configured.
+#
+# PyPI itself is intentionally not configured yet — GitHub Releases + the
+# internal registry only. The mirror is gated on vars/secrets so a fork or a
+# clean clone is unaffected.
 
 name: Publish
 
@@ -12,10 +16,44 @@ on:
         description: Build wheels without creating a GitHub Release
         type: boolean
         default: true
+      mirror:
+        description: Publish built wheels to the family Gitea index
+        type: boolean
+        default: false
 
 permissions: {}
 
 jobs:
+  preflight:
+    # Decides whether the Gitea mirror is configured, and publishes that as an
+    # OUTPUT rather than letting the mirror job test it directly.
+    #
+    # The `secrets` context is NOT available in a job-level `if:` — only
+    # github, needs, vars and inputs are. So `if: secrets.FOO != ''` does not
+    # error; it evaluates empty and SILENTLY SKIPS the job. Read the secret in
+    # a step `env` and reduce it to a boolean instead.
+    name: preflight
+    runs-on: ubuntu-latest
+    outputs:
+      mirror_enabled: ${{ steps.check.outputs.mirror_enabled }}
+    steps:
+      - name: is the Gitea mirror configured?
+        id: check
+        env:
+          MIRROR_URL: ${{ vars.PYPI_CUSTOM_URL }}
+          MIRROR_USER: ${{ secrets.PYPI_CUSTOM_USERNAME }}
+          MIRROR_TOKEN: ${{ secrets.PYPI_CUSTOM_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MIRROR_URL}" ] && [ -n "${MIRROR_USER}" ] && [ -n "${MIRROR_TOKEN}" ]; then
+            echo "mirror_enabled=true" >> "$GITHUB_OUTPUT"
+            echo "mirror configured at ${MIRROR_URL}"
+          else
+            echo "mirror_enabled=false" >> "$GITHUB_OUTPUT"
+            echo "mirror not configured, skipping it:" \
+                 "url:${MIRROR_URL:+set} user:${MIRROR_USER:+set} token:${MIRROR_TOKEN:+set}"
+          fi
+
   version-gate:
     name: version gate
     runs-on: ubuntu-latest
@@ -162,6 +200,71 @@ jobs:
           print("smoke ok")
           PY
 
+  # Deliberately does NOT gate github-release. A registry problem must not
+  # cost a GitHub Release (same independence as l3io-wordpress-database).
+  publish-mirror:
+    name: mirror to family index
+    needs: [linux, macos, windows, sdist, smoke, preflight]
+    if: >-
+      needs.preflight.outputs.mirror_enabled == 'true' &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' && inputs.mirror))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: "0.11.6"
+      - name: list artifacts
+        run: ls -la dist/
+      - name: which files are already on the registry?
+        # Multi-platform package: skip files already present and upload only
+        # the missing ones. `uv publish --check-url` does not receive the
+        # publish credentials, so it cannot do this itself.
+        id: missing
+        env:
+          MIRROR_URL: ${{ vars.PYPI_CUSTOM_URL }}
+          MIRROR_USER: ${{ secrets.PYPI_CUSTOM_USERNAME }}
+          MIRROR_TOKEN: ${{ secrets.PYPI_CUSTOM_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/to-publish
+          code=$(curl -sS -o /tmp/simple.html -w '%{http_code}' \
+                   -u "${MIRROR_USER}:${MIRROR_TOKEN}" \
+                   "${MIRROR_URL%/}/simple/l3io-age-passphrase/" || echo "000")
+          echo "simple index HTTP ${code}"
+          count=0
+          for path in dist/*; do
+            [ -f "$path" ] || continue
+            base=$(basename "$path")
+            if [ "$code" = "200" ] && grep -qF "$base" /tmp/simple.html; then
+              echo "skip (already present): $base"
+            else
+              echo "will publish: $base"
+              cp "$path" /tmp/to-publish/
+              count=$((count + 1))
+            fi
+          done
+          echo "missing_count=${count}" >> "$GITHUB_OUTPUT"
+          if [ "$count" -eq 0 ]; then
+            echo "::notice::all artifacts already on the registry; skipping upload"
+          fi
+
+      - name: upload missing files to Gitea
+        if: steps.missing.outputs.missing_count != '0'
+        env:
+          UV_PUBLISH_URL: ${{ vars.PYPI_CUSTOM_URL }}
+          UV_PUBLISH_USERNAME: ${{ secrets.PYPI_CUSTOM_USERNAME }}
+          UV_PUBLISH_PASSWORD: ${{ secrets.PYPI_CUSTOM_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Trailing slash required by Gitea's PyPI API.
+          uv publish --publish-url "${UV_PUBLISH_URL%/}/" /tmp/to-publish/*
+
   github-release:
     name: GitHub Release
     needs: [linux, macos, windows, sdist, smoke, version-gate]
@@ -190,11 +293,14 @@ jobs:
           body: |
             Streaming age passphrase encrypt/decrypt for Python.
 
-            Install a wheel that matches your platform from the assets below, for example:
+            Install from the family index (preferred for l3io packages):
 
             ```shell
-            uv pip install https://github.com/${{ github.repository }}/releases/download/v${{ needs.version-gate.outputs.version }}/<wheel-filename>.whl
+            uv pip install l3io-age-passphrase \
+              --index-url https://git.ravenwolf.org/api/packages/liquidlogiclabs/pypi/simple/
             ```
 
+            Or grab a platform wheel from the assets below.
+
             See the [README](https://github.com/${{ github.repository }}#readme) for API docs.
-            PyPI publish is not enabled yet.
+            Public PyPI publish is not enabled yet.
